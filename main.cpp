@@ -1,4 +1,5 @@
 #define GL_SILENCE_DEPRECATION
+#include "math.hpp"
 #include <FTGL/ftgl.h>
 #include <GLFW/glfw3.h>
 #include <OpenGL/gl.h>
@@ -10,8 +11,24 @@
 
 using namespace std;
 
+double MOTION_TIME = 0.016;
+double GRAVITY_SCALE = 0.01;
+
 struct Circle {
   double x, y, radius;
+  vec2 position, velocity, acc;
+
+  Circle() : x(0), y(0), radius(0) {
+    position = {0.0, 0.0};
+    velocity = {0.0, 0.0};
+    acc = {0.0, -9.8 * GRAVITY_SCALE};
+  }
+
+  Circle(double x_, double y_, double radius_) : x(x_), y(y_), radius(radius_) {
+    position = {x_, y_};
+    velocity = {0.0, 0.0};
+    acc = {0.0, -9.8 * GRAVITY_SCALE};
+  }
 };
 
 FTGLPixmapFont *font = nullptr;
@@ -67,8 +84,7 @@ void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods) {
   if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
     double x, y;
     convertToNDC(window, x, y);
-    Circle newCircle{(float)x, (float)y, 0.1};
-    circles.push_back(newCircle);
+    circles.push_back(Circle(x, y, 0.1));
   }
 }
 void cursorPosCallback(GLFWwindow *window, double x, double y) {
@@ -114,6 +130,23 @@ void renderText() {
   glPopAttrib();
 }
 
+void linearMotion(Circle &circle, double dt) {
+  vec2 deltaV = vec2_mul(circle.acc, dt);
+  circle.velocity = vec2_add(circle.velocity, deltaV);
+
+  vec2 deltaP = vec2_add(vec2_mul(circle.velocity, dt),
+                         vec2_mul(circle.acc, 0.5 * dt * dt));
+  circle.position = vec2_add(circle.position, deltaP);
+  circle.x = circle.position.x;
+  circle.y = circle.position.y;
+
+  if (circle.y <= -1.0 + circle.radius) {
+    circle.y = -1.0 + circle.radius;
+    circle.position.y = -1.0 + circle.radius;
+    circle.velocity.y = -0.7 * circle.velocity.y;
+  }
+}
+
 void renderCircles() {
   int width, height;
   glfwGetFramebufferSize(glfwGetCurrentContext(), &width, &height);
@@ -127,7 +160,8 @@ void renderCircles() {
   glLoadIdentity();
 
   glColor3f(1.0f, 0.0f, 0.0f);
-  for (const auto &circle : circles) {
+  for (auto &circle : circles) {
+    linearMotion(circle, MOTION_TIME);
     drawCircle(circle, 32);
   }
 }
