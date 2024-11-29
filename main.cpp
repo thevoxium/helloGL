@@ -13,18 +13,25 @@ using namespace std;
 
 double MOTION_TIME = 0.016;
 double GRAVITY_SCALE = 0.01;
+double RESTITUTION = 0.7;
+const int PHYSICS_STEPS = 4;
+const double PUSH_FACTOR = 1.05;
+const double MIN_VELOCITY = 0.001;
+const double MAX_VELOCITY = 2.0;
 
 struct Circle {
   double x, y, radius;
   vec2 position, velocity, acc;
+  double prevX, prevY;
 
-  Circle() : x(0), y(0), radius(0) {
+  Circle() : x(0), y(0), radius(0), prevX(0), prevY(0) {
     position = {0.0, 0.0};
     velocity = {0.0, 0.0};
     acc = {0.0, -9.8 * GRAVITY_SCALE};
   }
 
-  Circle(double x_, double y_, double radius_) : x(x_), y(y_), radius(radius_) {
+  Circle(double x_, double y_, double radius_)
+      : x(x_), y(y_), radius(radius_), prevX(x_), prevY(y_) {
     position = {x_, y_};
     velocity = {0.0, 0.0};
     acc = {0.0, -9.8 * GRAVITY_SCALE};
@@ -38,6 +45,118 @@ vector<Circle> circles;
 void errorCallback(int error, const char *message) {
   cerr << "GLFW Error " << error << ": " << message << endl;
 }
+
+void capVelocity(vec2 &velocity) {
+  double speedSquared = velocity.x * velocity.x + velocity.y * velocity.y;
+  if (speedSquared > MAX_VELOCITY * MAX_VELOCITY) {
+    double speed = sqrt(speedSquared);
+    velocity.x = (velocity.x / speed) * MAX_VELOCITY;
+    velocity.y = (velocity.y / speed) * MAX_VELOCITY;
+  }
+}
+
+bool checkLineCircleIntersection(double x1, double y1, double x2, double y2,
+                                 double cx, double cy, double radius) {
+  double dx = x2 - x1;
+  double dy = y2 - y1;
+  double a = dx * dx + dy * dy;
+  double b = 2 * (dx * (x1 - cx) + dy * (y1 - cy));
+  double c = cx * cx + cy * cy + x1 * x1 + y1 * y1 - 2 * (cx * x1 + cy * y1) -
+             radius * radius;
+
+  double discriminant = b * b - 4 * a * c;
+  if (discriminant < 0)
+    return false;
+
+  discriminant = sqrt(discriminant);
+  double t1 = (-b - discriminant) / (2 * a);
+  double t2 = (-b + discriminant) / (2 * a);
+
+  return (t1 >= 0 && t1 <= 1) || (t2 >= 0 && t2 <= 1);
+}
+
+void resolveCollision(Circle &a, Circle &b) {
+  vec2 normal = {b.x - a.x, b.y - a.y};
+  double dist = sqrt(normal.x * normal.x + normal.y * normal.y);
+
+  if (dist == 0) {
+    a.x -= 0.001;
+    b.x += 0.001;
+    return;
+  }
+
+  normal = {normal.x / dist, normal.y / dist};
+
+  double relativeVelocityX = b.velocity.x - a.velocity.x;
+  double relativeVelocityY = b.velocity.y - a.velocity.y;
+  double velocityAlongNormal =
+      relativeVelocityX * normal.x + relativeVelocityY * normal.y;
+
+  if (velocityAlongNormal > 0)
+    return;
+
+  double impulse = -(1 + RESTITUTION) * velocityAlongNormal * 0.5;
+
+  vec2 impulseVec = {normal.x * impulse, normal.y * impulse};
+
+  a.velocity.x -= impulseVec.x;
+  a.velocity.y -= impulseVec.y;
+  b.velocity.x += impulseVec.x;
+  b.velocity.y += impulseVec.y;
+
+  capVelocity(a.velocity);
+  capVelocity(b.velocity);
+
+  double overlap = (a.radius + b.radius) - dist;
+  if (overlap > 0) {
+    vec2 correction = {normal.x * overlap * PUSH_FACTOR * 0.5,
+                       normal.y * overlap * PUSH_FACTOR * 0.5};
+
+    a.x -= correction.x;
+    a.y -= correction.y;
+    a.position.x = a.x;
+    a.position.y = a.y;
+
+    b.x += correction.x;
+    b.y += correction.y;
+    b.position.x = b.x;
+    b.position.y = b.y;
+  }
+
+  if (fabs(a.velocity.x) < MIN_VELOCITY)
+    a.velocity.x = 0;
+  if (fabs(a.velocity.y) < MIN_VELOCITY)
+    a.velocity.y = 0;
+  if (fabs(b.velocity.x) < MIN_VELOCITY)
+    b.velocity.x = 0;
+  if (fabs(b.velocity.y) < MIN_VELOCITY)
+    b.velocity.y = 0;
+}
+
+void checkCollisions() {
+  for (size_t i = 0; i < circles.size(); i++) {
+    for (size_t j = i + 1; j < circles.size(); j++) {
+      Circle &a = circles[i];
+      Circle &b = circles[j];
+
+      if (checkLineCircleIntersection(a.prevX, a.prevY, a.x, a.y, b.x, b.y,
+                                      a.radius + b.radius) ||
+          checkLineCircleIntersection(b.prevX, b.prevY, b.x, b.y, a.x, a.y,
+                                      a.radius + b.radius)) {
+        resolveCollision(a, b);
+      }
+
+      double dx = b.x - a.x;
+      double dy = b.y - a.y;
+      double distance = sqrt(dx * dx + dy * dy);
+
+      if (distance < (a.radius + b.radius)) {
+        resolveCollision(a, b);
+      }
+    }
+  }
+}
+
 void drawCircle(Circle circle, int segments) {
   glLineWidth(2.0f);
   glBegin(GL_LINE_LOOP);
@@ -71,11 +190,11 @@ void convertToNDC(GLFWwindow *window, double &x, double &y) {
   x *= scaleX;
   y *= scaleY;
 
-  float normalized_x = (float)x / fbWidth;   // First normalize to [0,1]
-  normalized_x = normalized_x * 2.0f - 1.0f; // Then convert to [-1,1]
+  float normalized_x = (float)x / fbWidth;
+  normalized_x = normalized_x * 2.0f - 1.0f;
 
   float normalized_y = (float)y / fbHeight;
-  normalized_y = -(normalized_y * 2.0f - 1.0f); // Flip Y and convert to [-1,1]
+  normalized_y = -(normalized_y * 2.0f - 1.0f);
   x = normalized_x;
   y = normalized_y;
 }
@@ -87,6 +206,7 @@ void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods) {
     circles.push_back(Circle(x, y, 0.1));
   }
 }
+
 void cursorPosCallback(GLFWwindow *window, double x, double y) {
   stringstream ss;
   ss << "X: " << (int)x << ", Y: " << (int)y;
@@ -94,7 +214,6 @@ void cursorPosCallback(GLFWwindow *window, double x, double y) {
 }
 
 void renderText() {
-  // Switch to compatibility profile state
   glPushAttrib(GL_ALL_ATTRIB_BITS);
   glMatrixMode(GL_PROJECTION);
   glPushMatrix();
@@ -108,7 +227,6 @@ void renderText() {
   glPushMatrix();
   glLoadIdentity();
 
-  // Enable texturing and blending for text
   glEnable(GL_TEXTURE_2D);
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -123,7 +241,6 @@ void renderText() {
   glRasterPos2f(xPos, yPos);
   font->Render(mouseCoords.c_str());
 
-  // Restore previous state
   glPopMatrix();
   glMatrixMode(GL_PROJECTION);
   glPopMatrix();
@@ -131,8 +248,13 @@ void renderText() {
 }
 
 void linearMotion(Circle &circle, double dt) {
+  circle.prevX = circle.x;
+  circle.prevY = circle.y;
+
   vec2 deltaV = vec2_mul(circle.acc, dt);
   circle.velocity = vec2_add(circle.velocity, deltaV);
+
+  capVelocity(circle.velocity);
 
   vec2 deltaP = vec2_add(vec2_mul(circle.velocity, dt),
                          vec2_mul(circle.acc, 0.5 * dt * dt));
@@ -143,8 +265,40 @@ void linearMotion(Circle &circle, double dt) {
   if (circle.y <= -1.0 + circle.radius) {
     circle.y = -1.0 + circle.radius;
     circle.position.y = -1.0 + circle.radius;
-    circle.velocity.y = -0.7 * circle.velocity.y;
+    circle.velocity.y = -RESTITUTION * circle.velocity.y;
+    if (fabs(circle.velocity.y) < MIN_VELOCITY) {
+      circle.velocity.y = 0;
+    }
   }
+
+  if (circle.y >= 1.0 - circle.radius) {
+    circle.y = 1.0 - circle.radius;
+    circle.position.y = 1.0 - circle.radius;
+    circle.velocity.y = -RESTITUTION * circle.velocity.y;
+    if (fabs(circle.velocity.y) < MIN_VELOCITY) {
+      circle.velocity.y = 0;
+    }
+  }
+
+  if (circle.x <= -1.0 + circle.radius) {
+    circle.x = -1.0 + circle.radius;
+    circle.position.x = -1.0 + circle.radius;
+    circle.velocity.x = -RESTITUTION * circle.velocity.x;
+    if (fabs(circle.velocity.x) < MIN_VELOCITY) {
+      circle.velocity.x = 0;
+    }
+  }
+
+  if (circle.x >= 1.0 - circle.radius) {
+    circle.x = 1.0 - circle.radius;
+    circle.position.x = 1.0 - circle.radius;
+    circle.velocity.x = -RESTITUTION * circle.velocity.x;
+    if (fabs(circle.velocity.x) < MIN_VELOCITY) {
+      circle.velocity.x = 0;
+    }
+  }
+
+  capVelocity(circle.velocity);
 }
 
 void renderCircles() {
@@ -159,12 +313,21 @@ void renderCircles() {
   glMatrixMode(GL_MODELVIEW);
   glLoadIdentity();
 
-  glColor3f(1.0f, 0.0f, 0.0f);
+  glColor3f(1.0f, 1.0f, 1.0f);
+
+  double subDt = MOTION_TIME / PHYSICS_STEPS;
+  for (int step = 0; step < PHYSICS_STEPS; step++) {
+    for (auto &circle : circles) {
+      linearMotion(circle, subDt);
+    }
+    checkCollisions();
+  }
+
   for (auto &circle : circles) {
-    linearMotion(circle, MOTION_TIME);
     drawCircle(circle, 32);
   }
 }
+
 int main() {
   if (!glfwInit()) {
     cerr << "Failed to initialize GLFW" << endl;
@@ -173,14 +336,13 @@ int main() {
 
   glfwSetErrorCallback(errorCallback);
 
-  // Request compatibility profile instead of core profile
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
   glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_FALSE);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_ANY_PROFILE);
 
   GLFWwindow *window =
-      glfwCreateWindow(800, 600, "Mouse Coordinates", nullptr, nullptr);
+      glfwCreateWindow(800, 600, "Circle Physics", nullptr, nullptr);
   if (!window) {
     cerr << "Failed to create window" << endl;
     glfwTerminate();
@@ -191,7 +353,6 @@ int main() {
   glfwSetCursorPosCallback(window, cursorPosCallback);
   glfwMakeContextCurrent(window);
 
-  // Initialize font
   font = new FTGLPixmapFont("/System/Library/Fonts/Helvetica.ttc");
   if (font->Error()) {
     cerr << "Failed to load font" << endl;
@@ -201,7 +362,6 @@ int main() {
   }
   font->FaceSize(36);
 
-  // Set clear color
   glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 
   while (!glfwWindowShouldClose(window)) {
